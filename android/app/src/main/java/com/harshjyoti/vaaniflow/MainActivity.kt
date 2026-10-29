@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -36,7 +37,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 import java.io.File
+import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -47,7 +50,10 @@ class MainActivity : ComponentActivity() {
     private var status by mutableStateOf("Ready to record")
     private var lastFile by mutableStateOf<String?>(null)
     private var recordings by mutableStateOf<List<File>>(emptyList())
+
     private var playingPath by mutableStateOf<String?>(null)
+    private var playbackPosition by mutableIntStateOf(0)
+    private var playbackDuration by mutableIntStateOf(0)
 
     private var mediaPlayer: MediaPlayer? = null
 
@@ -112,6 +118,8 @@ class MainActivity : ComponentActivity() {
                     status = status,
                     recordings = recordings,
                     playingPath = playingPath,
+                    playbackPosition = playbackPosition,
+                    playbackDuration = playbackDuration,
                     onToggleRecording = {
                         if (recording) {
                             stopRecording()
@@ -121,6 +129,9 @@ class MainActivity : ComponentActivity() {
                     },
                     onPlayRecording = { file ->
                         playRecording(file)
+                    },
+                    onPlaybackTick = {
+                        updatePlaybackPosition()
                     }
                 )
             }
@@ -188,10 +199,19 @@ class MainActivity : ComponentActivity() {
 
             player.setDataSource(file.absolutePath)
 
+            player.setOnPreparedListener {
+                playbackDuration = it.duration
+                playbackPosition = 0
+                playingPath = file.absolutePath
+                status = "Playing ${file.name}"
+                it.start()
+            }
+
             player.setOnCompletionListener {
                 if (mediaPlayer === it) {
                     mediaPlayer = null
                     playingPath = null
+                    playbackPosition = 0
                     it.release()
                 }
             }
@@ -202,14 +222,9 @@ class MainActivity : ComponentActivity() {
                     playingPath = null
                 }
                 mp.release()
+                playbackPosition = 0
                 status = "Could not play recording"
                 true
-            }
-
-            player.setOnPreparedListener {
-                it.start()
-                playingPath = file.absolutePath
-                status = "Playing ${file.name}"
             }
 
             playingPath = file.absolutePath
@@ -220,15 +235,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updatePlaybackPosition() {
+        val player = mediaPlayer ?: return
+
+        try {
+            if (player.isPlaying) {
+                playbackPosition = player.currentPosition
+            }
+        } catch (_: IllegalStateException) {
+            // Player may be preparing or already released.
+        }
+    }
+
     private fun stopPlayback() {
         val player = mediaPlayer
         mediaPlayer = null
         playingPath = null
+        playbackPosition = 0
+        playbackDuration = 0
 
         try {
             player?.stop()
         } catch (_: Exception) {
-            // The player may not have started yet.
+            // Player may not have started yet.
         }
 
         player?.release()
@@ -247,9 +276,19 @@ fun VaaniFlowScreen(
     status: String,
     recordings: List<File>,
     playingPath: String?,
+    playbackPosition: Int,
+    playbackDuration: Int,
     onToggleRecording: () -> Unit,
-    onPlayRecording: (File) -> Unit
+    onPlayRecording: (File) -> Unit,
+    onPlaybackTick: () -> Unit
 ) {
+    LaunchedEffect(playingPath) {
+        while (playingPath != null) {
+            onPlaybackTick()
+            delay(250)
+        }
+    }
+
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -350,6 +389,8 @@ fun VaaniFlowScreen(
                         RecordingCard(
                             file = file,
                             isPlaying = playingPath == file.absolutePath,
+                            playbackPosition = playbackPosition,
+                            playbackDuration = playbackDuration,
                             onPlay = { onPlayRecording(file) }
                         )
                     }
@@ -369,8 +410,23 @@ fun VaaniFlowScreen(
 private fun RecordingCard(
     file: File,
     isPlaying: Boolean,
+    playbackPosition: Int,
+    playbackDuration: Int,
     onPlay: () -> Unit
 ) {
+    val date = remember(file.lastModified()) {
+        SimpleDateFormat(
+            "dd MMM yyyy, hh:mm a",
+            Locale.getDefault()
+        ).format(Date(file.lastModified()))
+    }
+
+    val sizeKb = file.length() / 1024.0
+
+    val durationMs = remember(file.lastModified(), file.length()) {
+        readWavDurationMs(file)
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -385,19 +441,38 @@ private fun RecordingCard(
 
             Spacer(Modifier.height(4.dp))
 
-            val date = remember(file.lastModified()) {
-                SimpleDateFormat(
-                    "dd MMM yyyy, hh:mm a",
-                    Locale.getDefault()
-                ).format(Date(file.lastModified()))
-            }
-
-            val sizeKb = file.length() / 1024.0
-
             Text(
                 text = "$date  •  ${"%.1f".format(Locale.US, sizeKb)} KB",
                 style = MaterialTheme.typography.bodySmall
             )
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                text = "Duration: ${formatDuration(durationMs)}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            if (isPlaying && playbackDuration > 0) {
+                Spacer(Modifier.height(10.dp))
+
+                LinearProgressIndicator(
+                    progress = {
+                        (playbackPosition.toFloat() / playbackDuration)
+                            .coerceIn(0f, 1f)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(Modifier.height(4.dp))
+
+                Text(
+                    text = "${formatDuration(playbackPosition)} / ${
+                        formatDuration(playbackDuration)
+                    }",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
 
             Spacer(Modifier.height(10.dp))
 
@@ -409,4 +484,69 @@ private fun RecordingCard(
             }
         }
     }
+}
+
+private fun readWavDurationMs(file: File): Int {
+    return try {
+        RandomAccessFile(file, "r").use { wav ->
+            if (wav.length() < 44) return 0
+
+            wav.seek(24)
+            val sampleRate = readLittleEndianInt(wav)
+
+            wav.seek(34)
+            val bitsPerSample = readLittleEndianShort(wav)
+
+            wav.seek(40)
+            val dataSize = readLittleEndianInt(wav).toLong() and 0xffffffffL
+
+            val bytesPerSecond =
+                sampleRate.toLong() * (bitsPerSample / 8)
+
+            if (bytesPerSecond <= 0L) {
+                0
+            } else {
+                (dataSize * 1000L / bytesPerSecond)
+                    .coerceAtMost(Int.MAX_VALUE.toLong())
+                    .toInt()
+            }
+        }
+    } catch (_: Exception) {
+        0
+    }
+}
+
+private fun readLittleEndianInt(file: RandomAccessFile): Int {
+    val b0 = file.read()
+    val b1 = file.read()
+    val b2 = file.read()
+    val b3 = file.read()
+
+    if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) {
+        throw java.io.EOFException()
+    }
+
+    return b0 or
+        (b1 shl 8) or
+        (b2 shl 16) or
+        (b3 shl 24)
+}
+
+private fun readLittleEndianShort(file: RandomAccessFile): Int {
+    val b0 = file.read()
+    val b1 = file.read()
+
+    if (b0 < 0 || b1 < 0) {
+        throw java.io.EOFException()
+    }
+
+    return b0 or (b1 shl 8)
+}
+
+private fun formatDuration(milliseconds: Int): String {
+    val totalSeconds = (milliseconds.coerceAtLeast(0)) / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+
+    return "%02d:%02d".format(Locale.US, minutes, seconds)
 }
